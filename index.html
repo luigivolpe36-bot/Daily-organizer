@@ -423,9 +423,10 @@ button.cell:hover{transform:scale(1.08)}
 
     <details class="card tools">
       <summary>Strumenti di prova</summary>
-      <p class="muted">Servono a testare l'app senza aspettare la mezzanotte. «Simula mezzanotte» sposta in avanti il calendario dell'app di un giorno (e inietta le task programmate); «Azzera tutti i dati» lo riporta a oggi.</p>
+      <p class="muted">Servono a testare l'app senza aspettare la mezzanotte. «Simula mezzanotte» salva prima una copia dei tuoi dati, poi sposta in avanti il calendario dell'app di un giorno. «Torna a oggi» ripristina la copia: i dati reali restano intatti e le prove vengono scartate.</p>
       <div class="btn-grid">
         <button type="button" class="btn" id="btn-sim">Simula mezzanotte</button>
+        <button type="button" class="btn primary" id="btn-sim-exit" hidden>Torna a oggi</button>
         <button type="button" class="btn" id="btn-sample">Carica dati di esempio</button>
       </div>
     </details>
@@ -730,7 +731,9 @@ function renderToday() {
   $('#today-date').textContent = `${cap(WD[d.getDay()])} ${d.getDate()} ${MONTHS[d.getMonth()]}`;
   const sb = $('#sim-banner');
   sb.hidden = !S.simOffset;
-  sb.textContent = S.simOffset ? `Modalità prova: calendario dell'app avanti di ${S.simOffset} ${S.simOffset === 1 ? 'giorno' : 'giorni'}.` : '';
+  sb.innerHTML = S.simOffset ? `<span>Modalità prova: calendario avanti di ${S.simOffset} ${S.simOffset === 1 ? 'giorno' : 'giorni'}. I tuoi dati reali sono al sicuro.</span>
+    <button type="button" class="link" data-sim-exit>Torna a oggi</button>` : '';
+  const ex = $('#btn-sim-exit'); if (ex) ex.hidden = !S.simOffset;
   const items = todayItems();
   let h = S.medRoutine.length ? '' : '<li class="hint-row" role="presentation">Nessun farmaco o integratore in routine. Tocca «Modifica» per aggiungerli: compariranno qui ogni giorno.</li>';
   SLOTS.forEach(s => { h += `<li class="slot" role="presentation">${s}</li>`; items.filter(i => i.cat === 'meds' && i.slot === s).forEach(i => h += itemHTML(i)); });
@@ -1035,11 +1038,51 @@ $('#btn-reset').addEventListener('click', e => {
     armT = setTimeout(() => { b.classList.remove('armed'); b.textContent = 'Azzera tutti i dati'; }, 4000); return;
   }
   clearTimeout(armT); b.classList.remove('armed'); b.textContent = 'Azzera tutti i dati';
+  try { localStorage.removeItem(SIM_KEY); } catch (e) {} memSnap = null;
   S = blank(); rollover(); save(); dayLimit = 14; renderAll(); toast('Tutti i dati sono stati cancellati.');
 });
 
 /* ============ STRUMENTI DI PROVA ============ */
-$('#btn-sim').addEventListener('click', () => { S.simOffset = (S.simOffset || 0) + 1; save(); tick(); renderAll(); });
+const SIM_KEY = KEY + '.prima-della-prova';
+let memSnap = null;   // copia di riserva se localStorage non è disponibile
+$('#btn-sim').addEventListener('click', () => {
+  if (!S.simOffset) {                                   // prima simulazione: salva i dati reali
+    memSnap = JSON.stringify(S);
+    try { localStorage.setItem(SIM_KEY, memSnap); } catch (e) {}
+  }
+  S.simOffset = (S.simOffset || 0) + 1; save(); tick(); renderAll();
+});
+function exitSim() {
+  let snap = null;
+  try { snap = localStorage.getItem(SIM_KEY); } catch (e) {}
+  snap = snap || memSnap;
+  if (snap) {
+    S = migrate(Object.assign(blank(), JSON.parse(snap)));   // ripristina esattamente i dati prima della prova
+  } else {
+    // Nessuna copia (simulazione fatta con una versione precedente): annulla i giorni simulati a mano
+    const realD = new Date(), real = iso(realD), rws = iso(mondayOf(realD));
+    const rec = S.dailyHistory.find(d => d.date === real);
+    S.dailyHistory = S.dailyHistory.filter(d => d.date < real);
+    const fakeW = S.weeklyArchive.filter(w => w.start >= rws);
+    fakeW.forEach(w => { S.totalWorkouts = Math.max(0, S.totalWorkouts - w.gym); });
+    S.weeklyArchive = S.weeklyArchive.filter(w => w.start < rws);
+    const cw = fakeW.find(w => w.start === rws);
+    if (cw) { S.gym = Array.from({length:GYM_TARGET}, (_, i) => i < cw.gym); S.gymLog = Array(GYM_TARGET).fill(null); }
+    S.checks = {};
+    if (rec) rec.items.forEach(i => {
+      if (i.done) S.checks[i.id] = true;
+      if (i.id.startsWith('c_') && !S.customTasks.some(t => t.id === i.id)) S.customTasks.push({id:i.id, cat:i.cat, kind:i.kind, label:i.label, custom:true});
+    });
+    S.workoutDates = S.workoutDates.filter(d => d <= real);
+    S.currentDay = real; S.currentWeekStart = rws;
+  }
+  S.simOffset = 0; memSnap = null;
+  try { localStorage.removeItem(SIM_KEY); } catch (e) {}
+  rollover(); save(); renderAll();
+  toast('Tornato a oggi: i tuoi dati reali sono intatti.');
+}
+$('#btn-sim-exit').addEventListener('click', exitSim);
+document.addEventListener('click', e => { if (e.target.closest('[data-sim-exit]')) exitSim(); });
 function loadSample() {
   if (S.sampleWorkouts != null) return;
   const P = {med:.92, meal:.88, study:.78, extra:.75};
